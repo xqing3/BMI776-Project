@@ -1,0 +1,1 @@
+This folder contains all our Code for understanding the interactions we obtained from running CellChat and CellPhoneDB.
