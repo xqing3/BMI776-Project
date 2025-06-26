@@ -6,3 +6,10 @@
 - `ExploreCellChat.ipynb` is when we were exploring different tools in CellChat.
 - `test_gold_standard.py` is making a dot plot for a perticular interaction.
 - The full paper describing this project can be found in the BMI_776_Final_Paper.pdf
+
+# Contributors
+
+- Crystal (Xin) Qing (qing3@wisc.edu) —  Research Design, Data Curation, Analysis Support
+- Siwei Qian (sqian32@wisc.edu) — Data Curation, Analysis Support
+- Aayush Gupta (gupta385@wisc.edu) - Data Curation, Analysis Support
+- Dr. Daifeng Wang (daifeng.wang@wisc.edu) — Project Advisor
