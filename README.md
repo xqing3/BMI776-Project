@@ -14,6 +14,6 @@ This repository contains the analysis code used in the study "Comparing the Math
 # Contributors
 
 - Crystal (Xin) Qing (qing3@wisc.edu) —  Research Design, Data Curation, Analysis Support
-- Siwei Qian (sqian32@wisc.edu) — Data Curation, Analysis Support
-- Aayush Gupta (gupta385@wisc.edu) - Data Curation, Analysis Support
+- Siwei Qian (sqian32@wisc.edu) — Research Design, Data Curation, Analysis Support
+- Aayush Gupta (gupta385@wisc.edu) - Research Design, Data Curation, Analysis Support
 - Dr. Daifeng Wang (daifeng.wang@wisc.edu) — Project Advisor
