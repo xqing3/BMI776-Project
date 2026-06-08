@@ -8,26 +8,35 @@ on:
 
 jobs:
   bot:
-    # Only run when someone writes "@bot" (and not on the bot's own comments)
+    # Only run when someone writes "@bot"
     if: |
       (github.event_name == 'issues' && contains(github.event.issue.body, '@bot')) ||
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@bot'))
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
     steps:
-      - name: Generate AI review and post comment
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run NVIDIA bot
         uses: actions/github-script@v7
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           NVIDIA_MODEL: meta/llama-3.3-70b-instruct
         with:
           script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
             const apiKey = process.env.NVIDIA_API_KEY;
             const model = process.env.NVIDIA_MODEL;
             const { owner, repo } = context.repo;
+            const baseBranch =
+              context.payload.repository?.default_branch || 'Main';
 
             // Ignore comments made by bots to avoid loops
             if (context.eventName === 'issue_comment'
@@ -35,7 +44,7 @@ jobs:
               return;
             }
 
-            // Figure out the trigger text and the issue/PR number
+            // Trigger text + issue/PR number
             let userText = '';
             let issueNumber;
             if (context.eventName === 'issues') {
@@ -45,46 +54,61 @@ jobs:
               userText = context.payload.comment.body || '';
               issueNumber = context.payload.issue.number;
             }
+            const userRequest = userText.replace(/@bot/g, '').trim()
+              || 'Review the repository and improve it.';
 
             const issue = await github.rest.issues.get({
               owner, repo, issue_number: issueNumber
             });
-            const isPR = !!issue.data.pull_request;
 
-            // Assemble context for the model
-            let contextBlock =
-              `Title: ${issue.data.title}\n\n` +
-              `Description:\n${issue.data.body || '(none)'}`;
+            // ---- Gather repo context (tracked text files only) ----
+            const tracked = execSync('git ls-files', { encoding: 'utf8' })
+              .split('\n').filter(Boolean);
+            const TEXT_RE = /\.(md|txt|py|r| r|js|ts|json|ya?ml|toml|cfg|ini|sh|css|html)$/i;
+            const SKIP_RE = /\.(ipynb|pdf|png|jpe?g|gif|svg|csv|rds|rdata|xlsx?|zip)$/i;
 
-            if (isPR) {
+            let fileTree = tracked.join('\n');
+            let contextParts = [];
+            let budget = 24000; // chars
+            // Prioritise README first, then other small text files
+            const ordered = tracked.slice().sort((a, b) => {
+              const ar = /readme/i.test(a) ? 0 : 1;
+              const br = /readme/i.test(b) ? 0 : 1;
+              return ar - br;
+            });
+            for (const f of ordered) {
+              if (SKIP_RE.test(f) || !TEXT_RE.test(f)) continue;
               try {
-                const diff = await github.rest.pulls.get({
-                  owner, repo, pull_number: issueNumber,
-                  mediaType: { format: 'diff' }
-                });
-                let diffText = diff.data;
-                if (typeof diffText === 'string' && diffText.length > 12000) {
-                  diffText = diffText.slice(0, 12000) + '\n...(diff truncated)...';
-                }
-                contextBlock += `\n\nThis is a Pull Request. Code diff:\n${diffText}`;
-              } catch (e) {
-                contextBlock += `\n\n(Could not fetch PR diff: ${e.message})`;
-              }
+                const stat = fs.statSync(f);
+                if (stat.size > 16000) continue;
+                const body = fs.readFileSync(f, 'utf8');
+                const block = `\n=== FILE: ${f} ===\n${body}\n`;
+                if (block.length > budget) continue;
+                budget -= block.length;
+                contextParts.push(block);
+              } catch (e) { /* skip unreadable */ }
             }
 
-            const userRequest = userText.replace(/@bot/g, '').trim();
+            const systemPrompt =
+              'You are an autonomous senior software engineer operating a GitHub ' +
+              'repository. You can edit files. Respond with ONLY a single JSON ' +
+              'object, no prose outside it, in exactly this shape:\n' +
+              '{"summary": "<markdown summary of what you did and why>", ' +
+              '"files": [{"path": "<repo-relative path>", "content": "<full new ' +
+              'file content>"}]}\n' +
+              'Rules: Provide the COMPLETE new content for each file you change ' +
+              '(not a diff). Only include files that should change. If the ' +
+              'request is just a question and needs no file changes, return an ' +
+              'empty "files" array and put your answer in "summary". Never touch ' +
+              'binary files, notebooks (.ipynb), data, or .github/workflows. ' +
+              'Keep changes focused on what was asked.';
 
-            const messages = [
-              { role: 'system', content:
-                'You are a senior software engineer acting as a GitHub review ' +
-                'assistant. You review code and answer questions posted in ' +
-                'issues and pull requests. Be concise, use Markdown, and give ' +
-                'concrete, actionable feedback.' },
-              { role: 'user', content:
-                `A user mentioned you in a GitHub ${isPR ? 'pull request' : 'issue'}.\n\n` +
-                `${contextBlock}\n\nThe user's request:\n` +
-                `${userRequest || 'Please review this and provide feedback.'}` }
-            ];
+            const userPrompt =
+              `Repository: ${owner}/${repo}\n` +
+              `Issue/PR #${issueNumber}: ${issue.data.title}\n\n` +
+              `User request:\n${userRequest}\n\n` +
+              `--- Repository file list ---\n${fileTree}\n\n` +
+              `--- Selected file contents ---\n${contextParts.join('\n')}`;
 
             const resp = await fetch(
               'https://integrate.api.nvidia.com/v1/chat/completions', {
@@ -94,7 +118,13 @@ jobs:
                   'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                  model, messages, temperature: 0.2, max_tokens: 1500
+                  model,
+                  messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                  ],
+                  temperature: 0.2,
+                  max_tokens: 6000
                 })
               });
 
@@ -110,10 +140,78 @@ jobs:
             }
 
             const data = await resp.json();
-            const answer = data.choices?.[0]?.message?.content
-              || '(no response from model)';
+            const raw = data.choices?.[0]?.message?.content || '';
+
+            // Extract the JSON object defensively
+            let parsed = null;
+            const start = raw.indexOf('{');
+            const end = raw.lastIndexOf('}');
+            if (start !== -1 && end !== -1) {
+              try { parsed = JSON.parse(raw.slice(start, end + 1)); }
+              catch (e) { parsed = null; }
+            }
+
+            if (!parsed) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `🤖 I couldn't parse a valid edit from the model. Raw reply:\n\n` +
+                      raw.slice(0, 2000)
+              });
+              return;
+            }
+
+            const summary = parsed.summary || '(no summary)';
+            const files = Array.isArray(parsed.files) ? parsed.files : [];
+
+            // Safety-filter the files
+            const safe = files.filter(f =>
+              f && typeof f.path === 'string' && typeof f.content === 'string'
+              && !f.path.includes('..')
+              && !f.path.startsWith('/')
+              && !f.path.startsWith('.github/workflows')
+              && !/\.(ipynb|pdf|png|jpe?g|gif|svg|csv|rds|rdata|xlsx?|zip)$/i.test(f.path)
+            );
+
+            // No file changes -> just answer
+            if (safe.length === 0) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `🤖 **${model}** (via NVIDIA)\n\n${summary}`
+              });
+              return;
+            }
+
+            // Apply changes on a new branch
+            const branch = `bot/auto-${issueNumber}-${context.runId}`;
+            execSync(`git config user.name "github-actions[bot]"`);
+            execSync(`git config user.email ` +
+              `"41898282+github-actions[bot]@users.noreply.github.com"`);
+            execSync(`git checkout -b ${branch}`);
+
+            for (const f of safe) {
+              const dir = f.path.includes('/')
+                ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
+              if (dir) fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(f.path, f.content);
+            }
+            execSync('git add -A');
+            execSync(`git commit -m "Bot changes for #${issueNumber}"`);
+            execSync(`git push origin ${branch}`);
+
+            const changed = safe.map(f => `\`${f.path}\``).join(', ');
+            const pr = await github.rest.pulls.create({
+              owner, repo,
+              title: `🤖 Bot: changes for #${issueNumber}`,
+              head: branch,
+              base: baseBranch,
+              body: `Requested in #${issueNumber}.\n\n${summary}\n\n` +
+                    `**Files changed:** ${changed}\n\n` +
+                    `_Generated by ${model} via NVIDIA. Review before merging._`
+            });
 
             await github.rest.issues.createComment({
               owner, repo, issue_number: issueNumber,
-              body: `🤖 **${model}** (via NVIDIA)\n\n${answer}`
+              body: `🤖 I opened a pull request with the changes: #${pr.data.number}\n\n` +
+                    `**Summary:** ${summary}\n\n**Files:** ${changed}\n\n` +
+                    `Review and merge it if it looks good.`
             });
